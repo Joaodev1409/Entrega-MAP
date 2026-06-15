@@ -97,3 +97,93 @@ em vez de simplesmente não fazer nada.
 | 8 | Acoplamento concreto (DIP) | Consequência das interfaces dos itens 1-5 |
 | 9 | Saída via println | Proxy |
 | 10 | Falha silenciosa | Strategy (registro com exceção) |
+
+---
+
+## Parte 2 — Justificativa da Refatoração
+
+O código refatorado está em `src/pedido/`, organizado em pacotes por responsabilidade/padrão. O
+código legado original foi preservado em `legado/` como referência do diagnóstico.
+
+### `model/` — Enums e Value Objects (resolve o problema 6)
+`TipoCliente`, `FormaPagamento`, `TipoFrete`, `Estado` e `Cupom` substituem todas as strings
+mágicas do código legado ("VIP", "PIX", "SP", "NATAL10" etc.). `Pedido` passa a ser construído
+com esses tipos, eliminando comparações por `.equals()` em strings e erros de digitação.
+
+### `desconto/` — Decorator (resolve o problema 4)
+- `CalculoDesconto` é o componente; `DescontoBase` retorna 0.
+- `DescontoTipoCliente`, `DescontoCupom` e `DescontoSazonal` são decorators que somam sua
+  regra ao valor já calculado pelo decorator anterior, permitindo **combinar múltiplos
+  descontos dinamicamente** (requisito f e funcionalidade extra 2) sem alterar classes
+  existentes.
+- `DescontoComTeto` é o decorator mais externo e garante que a soma nunca passe de **40%** do
+  valor dos produtos (funcionalidade extra 2).
+- O novo tipo **PREMIUM** (15%, funcionalidade extra a) entrou apenas como um `case` em
+  `DescontoTipoCliente`, sem tocar nas demais classes.
+
+### `frete/` — Strategy + Decorator (resolve o problema 2)
+- `EstrategiaFrete` é a interface Strategy; `FreteNormal`, `FreteExpresso` e `FreteRetirada`
+  implementam cada tipo (via `FreteBase`, que centraliza a taxa de embrulho).
+- Um novo tipo de frete (requisito b) é apenas uma nova classe `EstrategiaFrete` registrada no
+  `Map` do `Main`, sem alterar o `ProcessadorPedido`.
+- `FreteGratisDecorator` implementa o cupom **FRETEGRATIS** (zera o frete, exceto se
+  EXPRESSO — funcionalidade extra b) sem alterar as estratégias existentes: o mesmo padrão
+  Decorator usado nos descontos é reaproveitado para um problema diferente.
+
+### `imposto/` — Strategy (resolve o problema 3)
+`CalculadoraImposto` define o contrato; `ImpostoSP`, `ImpostoRJ`, `ImpostoMG` e `ImpostoPadrao`
+isolam cada regra fiscal (requisito d). Uma nova regra por estado é uma nova classe + uma
+entrada no `Map<Estado, CalculadoraImposto>`.
+
+### `pagamento/` — Strategy + Template Method (resolve o problema 1)
+- `MetodoPagamento` é o contrato Strategy.
+- `MetodoPagamentoTemplate` define o Template Method `processar()`, fixando o roteiro
+  `ajustarValor → preparar → cobrar → confirmar`.
+- `PagamentoCartao`, `PagamentoPix` e `PagamentoBoleto` implementam apenas `preparar`/`cobrar`,
+  preservando exatamente as mensagens do sistema original (requisito i).
+- `PagamentoPaypal` (funcionalidade extra c) reaproveita o mesmo template e sobrescreve apenas
+  o hook `ajustarValor` para aplicar a taxa de 3%.
+- Adicionar uma nova forma de pagamento (requisito a) não exige alterar o `ProcessadorPedido`:
+  basta criar a classe e registrá-la no `Map<FormaPagamento, MetodoPagamento>`.
+
+### `notificacao/` — Observer + Proxy (resolve o problema 5)
+- `CanalNotificacao` é o observador; `NotificadorEmail`, `NotificadorSms` e
+  `NotificadorWhatsapp` (requisito e e funcionalidade extra d) implementam cada canal.
+- `TelefoneRequeridoProxy` é um proxy de proteção genérico, reaproveitado tanto para SMS quanto
+  para WhatsApp, garantindo que só enviem se o pedido tiver telefone cadastrado — sem duplicar
+  a verificação em cada notificador.
+- Novos canais são adicionados apenas registrando-os na lista de observadores no `Main`.
+
+### `processador/ProcessadorPedido` — Template Method (resolve os problemas 7 e 8)
+`processar()` é `final` e fixa o algoritmo: calcular total → processar pagamento → notificar →
+finalizar (requisito g). As variações (qual imposto, frete, pagamento, desconto e canais usar)
+vêm de abstrações injetadas via construtor — a classe nunca instancia implementações
+concretas, resolvendo o acoplamento direto (`new CalculadoraPedido()`) do código legado.
+
+### Seleção de estratégias via Map (resolve o problema 10)
+Cada `Map` (`calculadorasImposto`, `estrategiasFrete`, `metodosPagamento`) é montado uma única
+vez no `Main` e consultado pelo enum do `Pedido`. Se não houver entrada para o valor informado,
+`ProcessadorPedido` lança `IllegalArgumentException` explícita, eliminando a falha silenciosa
+do código legado.
+
+### Saída via `println` (problema 9)
+A saída via `System.out.println` foi mantida para preservar o comportamento observável original
+(requisito i), mas agora está isolada dentro de cada Strategy/Observer — pode ser substituída
+por um Proxy de log/teste ou por um objeto de resultado sem alterar a lógica de negócio.
+
+### Resumo — onde cada padrão foi aplicado
+
+| Padrão | Onde | Problema(s) do diagnóstico resolvido(s) |
+|---|---|---|
+| Enum / Value Object | `model/` | 6 |
+| Decorator | `desconto/` (descontos combináveis + teto de 40%), `frete/FreteGratisDecorator` | 2, 4 |
+| Strategy | `frete/`, `imposto/`, `pagamento/` | 1, 2, 3 |
+| Template Method | `pagamento/MetodoPagamentoTemplate`, `processador/ProcessadorPedido` | 1, 7, 8 |
+| Observer | `notificacao/` | 5 |
+| Proxy | `notificacao/TelefoneRequeridoProxy` | 5, 9 |
+
+### Validação
+O `Main.java` executa 5 cenários cobrindo o comportamento original (Pedido 1, idêntico ao
+legado) e todas as funcionalidades extras: cliente PREMIUM, cupom FRETEGRATIS (com e sem frete
+EXPRESSO), pagamento PAYPAL com taxa, canais sem telefone (SMS/WhatsApp não enviados) e o teto
+de 40% em descontos combinados.
